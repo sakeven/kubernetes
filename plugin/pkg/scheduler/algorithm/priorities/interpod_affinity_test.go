@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
-	schedulertesting "k8s.io/kubernetes/plugin/pkg/scheduler/testing"
 )
 
 type FakeNodeListInfo []*v1.Node
@@ -511,12 +510,12 @@ func TestInterPodAffinityPriority(t *testing.T) {
 	for _, test := range tests {
 		nodeNameToInfo := schedulercache.CreateNodeNameToInfoMap(test.pods, test.nodes)
 		interPodAffinity := InterPodAffinity{
-			info:                  FakeNodeListInfo(test.nodes),
-			nodeLister:            schedulertesting.FakeNodeLister(test.nodes),
-			podLister:             schedulertesting.FakePodLister(test.pods),
+			info: FakeNodeListInfo(test.nodes),
 			hardPodAffinityWeight: v1.DefaultHardPodAffinitySymmetricWeight,
 		}
-		list, err := interPodAffinity.CalculateInterPodAffinityPriority(test.pod, nodeNameToInfo, test.nodes)
+
+		nap := priorityFunction(interPodAffinity.Map, interPodAffinity.Reduce)
+		list, err := nap(test.pod, nodeNameToInfo, test.nodes)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -599,12 +598,12 @@ func TestHardPodAffinitySymmetricWeight(t *testing.T) {
 	for _, test := range tests {
 		nodeNameToInfo := schedulercache.CreateNodeNameToInfoMap(test.pods, test.nodes)
 		ipa := InterPodAffinity{
-			info:                  FakeNodeListInfo(test.nodes),
-			nodeLister:            schedulertesting.FakeNodeLister(test.nodes),
-			podLister:             schedulertesting.FakePodLister(test.pods),
+			info: FakeNodeListInfo(test.nodes),
 			hardPodAffinityWeight: test.hardPodAffinityWeight,
 		}
-		list, err := ipa.CalculateInterPodAffinityPriority(test.pod, nodeNameToInfo, test.nodes)
+
+		nap := priorityFunction(ipa.Map, ipa.Reduce)
+		list, err := nap(test.pod, nodeNameToInfo, test.nodes)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}

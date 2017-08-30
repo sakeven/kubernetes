@@ -17,6 +17,7 @@ limitations under the License.
 package priorities
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -34,23 +35,15 @@ import (
 
 type InterPodAffinity struct {
 	info                  predicates.NodeInfo
-	nodeLister            algorithm.NodeLister
-	podLister             algorithm.PodLister
 	hardPodAffinityWeight int
 }
 
-func NewInterPodAffinityPriority(
-	info predicates.NodeInfo,
-	nodeLister algorithm.NodeLister,
-	podLister algorithm.PodLister,
-	hardPodAffinityWeight int) algorithm.PriorityFunction {
+func NewInterPodAffinityPriority(info predicates.NodeInfo, hardPodAffinityWeight int) (algorithm.PriorityMapFunction, algorithm.PriorityReduceFunction) {
 	interPodAffinity := &InterPodAffinity{
-		info:                  info,
-		nodeLister:            nodeLister,
-		podLister:             podLister,
+		info: info,
 		hardPodAffinityWeight: hardPodAffinityWeight,
 	}
-	return interPodAffinity.CalculateInterPodAffinityPriority
+	return interPodAffinity.Map, interPodAffinity.Reduce
 }
 
 type podAffinityPriorityMap struct {
@@ -111,12 +104,22 @@ func (p *podAffinityPriorityMap) processTerms(terms []v1.WeightedPodAffinityTerm
 	}
 }
 
-// CalculateInterPodAffinityPriority compute a sum by iterating through the elements of weightedPodAffinityTerm and adding
+// Map fake
+func (ipa *InterPodAffinity) Map(pod *v1.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (schedulerapi.HostPriority, error) {
+	node := nodeInfo.Node()
+	if node == nil {
+		return schedulerapi.HostPriority{}, fmt.Errorf("node not found")
+	}
+
+	return schedulerapi.HostPriority{Host: node.Name, Score: 0}, nil
+}
+
+// Reduce compute a sum by iterating through the elements of weightedPodAffinityTerm and adding
 // "weight" to the sum if the corresponding PodAffinityTerm is satisfied for
 // that node; the node(s) with the highest sum are the most preferred.
 // Symmetry need to be considered for preferredDuringSchedulingIgnoredDuringExecution from podAffinity & podAntiAffinity,
 // symmetry need to be considered for hard requirements from podAffinity
-func (ipa *InterPodAffinity) CalculateInterPodAffinityPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulercache.NodeInfo, nodes []*v1.Node) (schedulerapi.HostPriorityList, error) {
+func (ipa *InterPodAffinity) Reduce(pod *v1.Pod, meta interface{}, nodeNameToInfo map[string]*schedulercache.NodeInfo, result schedulerapi.HostPriorityList) error {
 	affinity := pod.Spec.Affinity
 	hasAffinityConstraints := affinity != nil && affinity.PodAffinity != nil
 	hasAntiAffinityConstraints := affinity != nil && affinity.PodAntiAffinity != nil
@@ -126,9 +129,15 @@ func (ipa *InterPodAffinity) CalculateInterPodAffinityPriority(pod *v1.Pod, node
 		allNodeNames = append(allNodeNames, name)
 	}
 
+	nodes := make([]*v1.Node, 0, len(result))
+	for _, r := range result {
+		nodes = append(nodes, nodeNameToInfo[r.Host].Node())
+	}
+
 	// convert the topology key based weights to the node name based weights
 	var maxCount float64
 	var minCount float64
+
 	// priorityMap stores the mapping from node name to so-far computed score of
 	// the node.
 	pm := newPodAffinityPriorityMap(nodes)
@@ -207,7 +216,7 @@ func (ipa *InterPodAffinity) CalculateInterPodAffinityPriority(pod *v1.Pod, node
 	}
 	workqueue.Parallelize(16, len(allNodeNames), processNode)
 	if pm.firstError != nil {
-		return nil, pm.firstError
+		return pm.firstError
 	}
 
 	for _, node := range nodes {
@@ -220,18 +229,19 @@ func (ipa *InterPodAffinity) CalculateInterPodAffinityPriority(pod *v1.Pod, node
 	}
 
 	// calculate final priority score for each node
-	result := make(schedulerapi.HostPriorityList, 0, len(nodes))
-	for _, node := range nodes {
+	for i := range result {
+		host := result[i].Host
 		fScore := float64(0)
 		if (maxCount - minCount) > 0 {
-			fScore = float64(schedulerapi.MaxPriority) * ((pm.counts[node.Name] - minCount) / (maxCount - minCount))
+			fScore = float64(schedulerapi.MaxPriority) * ((pm.counts[host] - minCount) / (maxCount - minCount))
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int(fScore)})
+
+		result[i].Score = int(fScore)
 		if glog.V(10) {
 			// We explicitly don't do glog.V(10).Infof() to avoid computing all the parameters if this is
 			// not logged. There is visible performance gain from it.
-			glog.V(10).Infof("%v -> %v: InterPodAffinityPriority, Score: (%d)", pod.Name, node.Name, int(fScore))
+			glog.V(10).Infof("%v -> %v: InterPodAffinityPriority, Score: (%d)", pod.Name, host, int(fScore))
 		}
 	}
-	return result, nil
+	return nil
 }
